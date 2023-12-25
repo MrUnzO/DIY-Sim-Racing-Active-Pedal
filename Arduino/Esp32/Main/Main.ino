@@ -1064,13 +1064,10 @@ void servoCommunicationTask( void * pvParameters )
           rtDebugFilter.offerData({ isv57.servo_pos_given_p, isv57.servo_pos_error_p, isv57.servo_current_percent, servo_offset_compensation_steps_i32});
         }
 
-       
-
-        
     }
     else
     {
-      delay(1000);
+      
 
 #ifdef ISV_COMMUNICATION
     if(!isv57LifeSignal_b){
@@ -1090,17 +1087,14 @@ void servoCommunicationTask( void * pvParameters )
       if (servoCommuState && SENSORLESS_HOMING)
       {
         stepper->findMinMaxSensorless(&isv57);
-        delay(500);
         isv57LifeSignal_b = true;
-        Serial.print("FindMinMax Done:");
-        Serial.println(isv57LifeSignal_b);
       }
       
       
     }
 #endif
 
-      
+      delay(1000);
     }
 
 
