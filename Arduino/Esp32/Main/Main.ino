@@ -435,8 +435,9 @@ void pedalUpdateTask( void * pvParameters )
 {
 
   for(;;){
-    
-    if(!!isv57LifeSignal_b){
+    #ifdef ISV_COMMUNICATION
+    if(isv57LifeSignal_b){
+    #endif
       // system identification mode
       #ifdef ALLOW_SYSTEM_IDENTIFICATION
         if (systemIdentificationMode_b == true)
@@ -696,9 +697,11 @@ void pedalUpdateTask( void * pvParameters )
         Serial.print("PU task stack size="); Serial.println(temp2);
       #endif
 
+    #ifdef ISV_COMMUNICATION
     }else{
       delay(100);
     }
+    #endif
   }
 }
 
