@@ -435,273 +435,276 @@ void pedalUpdateTask( void * pvParameters )
 {
 
   for(;;){
-    #ifdef ISV_COMMUNICATION
+#ifdef ISV_COMMUNICATION
     if(isv57LifeSignal_b){
+#endif
+
+    // system identification mode
+    #ifdef ALLOW_SYSTEM_IDENTIFICATION
+      if (systemIdentificationMode_b == true)
+      {
+        measureStepResponse(stepper, &dap_calculationVariables_st, &dap_config_st, loadcell);
+        systemIdentificationMode_b = false;
+      }
     #endif
-      // system identification mode
-      #ifdef ALLOW_SYSTEM_IDENTIFICATION
-        if (systemIdentificationMode_b == true)
-        {
-          measureStepResponse(stepper, &dap_calculationVariables_st, &dap_config_st, loadcell);
-          systemIdentificationMode_b = false;
-        }
-      #endif
-      
+    
 
-      // controll cycle time. Delay did not work with the multi tasking, thus this workaround was integrated
-      unsigned long now = micros();
-      if (now - cycleTimeLastCall < PUT_TARGET_CYCLE_TIME_IN_US) // 100us = 10kHz
-      {
-        // skip 
-        continue;
-      }
-      {
-        // if target cycle time is reached, update last time
-        cycleTimeLastCall = now;
-      }
-
-      
-
-      // print the execution time averaged over multiple cycles 
-      #ifdef PRINT_CYCLETIME
-        static CycleTimer timerPU("PU cycle time");
-        timerPU.Bump();
-      #endif
-
-
-      // if a config update was received over serial, update the variables required for further computation
-      if (configUpdateAvailable == true)
-      {
-        if(semaphore_updateConfig!=NULL)
-        {
-
-          bool configWasUpdated_b = false;
-          // Take the semaphore and just update the config file, then release the semaphore
-          if(xSemaphoreTake(semaphore_updateConfig, (TickType_t)1)==pdTRUE)
-          {
-            Serial.println("Updating pedal config");
-            configUpdateAvailable = false;
-            dap_config_st = dap_config_st_local;
-            configWasUpdated_b = true;
-            xSemaphoreGive(semaphore_updateConfig);
-          }
-
-          // update the calc params
-          if (true == configWasUpdated_b)
-          {
-            Serial.println("Updating the calc params");
-            configWasUpdated_b = false;
-            dap_config_st.storeConfigToEprom(dap_config_st); // store config to EEPROM
-            updatePedalCalcParameters(); // update the calc parameters
-          }
-
-        }
-        else
-        {
-          semaphore_updateConfig = xSemaphoreCreateMutex();
-          //Serial.println("semaphore_updateConfig == 0");
-        }
-      }
-
-
-
-      // if reset pedal position was requested, reset pedal now
-      // This function is implemented, so that in case of lost steps, the user can request a reset of the pedal psotion
-      if (resetPedalPosition) {
-
-        if (isv57LifeSignal_b && SENSORLESS_HOMING)
-        {
-          stepper->refindMinLimitSensorless(&isv57);
-        }
-        else
-        {
-          stepper->refindMinLimit();
-        }
-        
-        resetPedalPosition = false;
-        resetServoEncoder = true;
-      }
-
-
-      //#define RECALIBRATE_POSITION
-      #ifdef RECALIBRATE_POSITION
-        stepper->checkLimitsAndResetIfNecessary();
-      #endif
-
-
-        // compute pedal oscillation, when ABS is active
-      float absForceOffset_fl32 = 0.0f;
-      #ifdef ABS_OSCILLATION
-        absForceOffset_fl32 = absOscillation.forceOffset(&dap_calculationVariables_st);
-      #endif
-
-
-      // compute the pedal incline angle 
-      //#define COMPUTE_PEDAL_INCLINE_ANGLE
-      #ifdef COMPUTE_PEDAL_INCLINE_ANGLE
-        float sledPosition = sledPositionInMM(stepper);
-        float pedalInclineAngle = pedalInclineAngleDeg(sledPosition, dap_config_st);
-
-        // compute angular velocity & acceleration of incline angke
-        float pedalInclineAngle_Accel = pedalInclineAngleAccel(pedalInclineAngle);
-
-        //float legRotationalMoment = 0.0000001;
-        //float forceCorrection = pedalInclineAngle_Accel * legRotationalMoment;
-
-        //Serial.print(pedalInclineAngle_Accel);
-        //Serial.println(" ");
-
-      #endif
-
-
-      // Get the loadcell reading
-      float loadcellReading = loadcell->getReadingKg();
-
-      // Do the loadcell signal filtering
-      float filteredReading = kalman->filteredValue(loadcellReading, 0, dap_config_st.payLoadPedalConfig_.kf_modelNoise);
-      float changeVelocity = kalman->changeVelocity();
-
-
-
-      // Apply FIR notch filter to reduce force oscillation caused by ABS
-      //#define APPLY_FIR_FILTER
-      #ifdef APPLY_FIR_FILTER
-        float filteredReading2 = firNotchFilter->filterValue(loadcellReading);
-        if (firCycleIncrementer > minCyclesForFirToInit)
-        {
-          filteredReading = filteredReading2;
-        }
-        else
-        {
-            firCycleIncrementer++;
-        }
-
-        firCycleIncrementer++;
-        /*if (firCycleIncrementer % 500 == 0)
-        { 
-          firCycleIncrementer = 0;
-          Serial.print(filteredReading);
-          Serial.print(",   ");
-          Serial.print(filteredReading2);
-          Serial.println("   ");
-        }*/
-        
-      #endif
-      
-
-      //#define DEBUG_FILTER
-      #ifdef DEBUG_FILTER
-        static RTDebugOutput<float, 2> rtDebugFilter({ "rawReading_g", "filtered_g"});
-        rtDebugFilter.offerData({ loadcellReading * 1000, filteredReading * 1000});
-      #endif
-        
-
-      /*#ifdef ABS_OSCILLATION
-        filteredReading += forceAbsOffset;
-      #endif*/
-
-      // use interpolation to determine local linearized spring stiffness
-      double stepperPosFraction = stepper->getCurrentPositionFraction();
-      //double stepperPosFraction2 = stepper->getCurrentPositionFractionFromExternalPos( -(int32_t)(isv57.servo_pos_given_p + isv57.servo_pos_error_p - isv57.getZeroPos()) );
-      //int32_t Position_Next = MoveByInterpolatedStrategy(filteredReading, stepperPosFraction, &forceCurve, &dap_calculationVariables_st, &dap_config_st);
-      int32_t Position_Next = MoveByPidStrategy(filteredReading, stepperPosFraction, stepper, &forceCurve, &dap_calculationVariables_st, &dap_config_st, absForceOffset_fl32);
-
-
-      //#define DEBUG_STEPPER_POS
-      #ifdef DEBUG_STEPPER_POS
-        static RTDebugOutput<int32_t, 5> rtDebugFilter({ "ESP_pos", "ESP_tar_pos", "ISV_pos", "frac1", "frac2"});
-        rtDebugFilter.offerData({ stepper->getCurrentPositionSteps(), Position_Next, -(int32_t)(isv57.servo_pos_given_p + isv57.servo_pos_error_p - isv57.getZeroPos()), (int32_t)(stepperPosFraction * 10000.), (int32_t)(stepperPosFraction2 * 10000.)});
-      #endif
-
-      
-      //stepper->printStates();
-      
-
-      // add dampening
-      if (dap_calculationVariables_st.dampingPress  > 0.0001)
-      {
-        // dampening is proportional to velocity --> D-gain for stability
-        Position_Next -= dap_calculationVariables_st.dampingPress * changeVelocity * dap_calculationVariables_st.springStiffnesssInv;
-      }
-        
-
-
-      
+    // controll cycle time. Delay did not work with the multi tasking, thus this workaround was integrated
+    unsigned long now = micros();
+    if (now - cycleTimeLastCall < PUT_TARGET_CYCLE_TIME_IN_US) // 100us = 10kHz
+    {
+      // skip 
+      continue;
+    }
+    {
+      // if target cycle time is reached, update last time
+      cycleTimeLastCall = now;
+    }
 
     
-      // clip target position to configured target interval
-      Position_Next = (int32_t)constrain(Position_Next, dap_calculationVariables_st.stepperPosMin, dap_calculationVariables_st.stepperPosMax);
 
-      // if pedal in min position, recalibrate position 
-      #ifdef ISV_COMMUNICATION
-      // Take the semaphore and just update the config file, then release the semaphore
-          if(xSemaphoreTake(semaphore_resetServoPos, (TickType_t)1)==pdTRUE)
-          {
-            if (stepper->isAtMinPos())
-            {
-              stepper->correctPos(servo_offset_compensation_steps_i32);
-              servo_offset_compensation_steps_i32 = 0;
-            }
-            xSemaphoreGive(semaphore_resetServoPos);
-          }
-      #endif
-
-
-
-      // get current stepper position right before sheduling a new move
-      //int32_t stepperPosCurrent = stepper->getCurrentPositionSteps();
-      //int32_t stepperPosCurrent = stepper->getTargetPositionSteps();
-      //int32_t movement = abs(stepperPosCurrent - Position_Next);
-      //if (movement > MIN_STEPS)
-      {
-        stepper->moveTo(Position_Next, false);
-      }
-
+    // print the execution time averaged over multiple cycles
+    if (dap_config_st.payLoadPedalConfig_.debug_flags_0 & DEBUG_INFO_0_CYCLE_TIMER) 
+    {
+      static CycleTimer timerPU("PU cycle time");
+      timerPU.Bump();
+    }
       
 
-      // compute controller output
-      if(semaphore_updateJoystick!=NULL)
+    // if a config update was received over serial, update the variables required for further computation
+    if (configUpdateAvailable == true)
+    {
+      if(semaphore_updateConfig!=NULL)
       {
-        if(xSemaphoreTake(semaphore_updateJoystick, (TickType_t)1)==pdTRUE) {
-          joystickNormalizedToInt32 = NormalizeControllerOutputValue(loadcellReading, dap_calculationVariables_st.Force_Min, dap_calculationVariables_st.Force_Max, dap_config_st.payLoadPedalConfig_.maxGameOutput);
-          //joystickNormalizedToInt32 = NormalizeControllerOutputValue(filteredReading, dap_calculationVariables_st.Force_Min, dap_calculationVariables_st.Force_Max, dap_config_st.payLoadPedalConfig_.maxGameOutput);
-          xSemaphoreGive(semaphore_updateJoystick);
+
+        bool configWasUpdated_b = false;
+        // Take the semaphore and just update the config file, then release the semaphore
+        if(xSemaphoreTake(semaphore_updateConfig, (TickType_t)1)==pdTRUE)
+        {
+          Serial.println("Updating pedal config");
+          configUpdateAvailable = false;
+          dap_config_st = dap_config_st_local;
+          configWasUpdated_b = true;
+          xSemaphoreGive(semaphore_updateConfig);
         }
+
+        // update the calc params
+        if (true == configWasUpdated_b)
+        {
+          Serial.println("Updating the calc params");
+          configWasUpdated_b = false;
+          dap_config_st.storeConfigToEprom(dap_config_st); // store config to EEPROM
+          updatePedalCalcParameters(); // update the calc parameters
+        }
+
       }
       else
       {
-        semaphore_updateJoystick = xSemaphoreCreateMutex();
-        //Serial.println("semaphore_updateJoystick == 0");
+        semaphore_updateConfig = xSemaphoreCreateMutex();
+        //Serial.println("semaphore_updateConfig == 0");
+      }
+    }
+
+
+
+    // if reset pedal position was requested, reset pedal now
+    // This function is implemented, so that in case of lost steps, the user can request a reset of the pedal psotion
+    if (resetPedalPosition) {
+
+      if (isv57LifeSignal_b && SENSORLESS_HOMING)
+      {
+        stepper->refindMinLimitSensorless(&isv57);
+      }
+      else
+      {
+        stepper->refindMinLimit();
       }
       
+      resetPedalPosition = false;
+      resetServoEncoder = true;
+    }
+
+
+    //#define RECALIBRATE_POSITION
+    #ifdef RECALIBRATE_POSITION
+      stepper->checkLimitsAndResetIfNecessary();
+    #endif
+
+
+      // compute pedal oscillation, when ABS is active
+    float absForceOffset_fl32 = 0.0f;
+    #ifdef ABS_OSCILLATION
+      absForceOffset_fl32 = absOscillation.forceOffset(&dap_calculationVariables_st);
+    #endif
+
+
+    // compute the pedal incline angle 
+    //#define COMPUTE_PEDAL_INCLINE_ANGLE
+    #ifdef COMPUTE_PEDAL_INCLINE_ANGLE
+      float sledPosition = sledPositionInMM(stepper);
+      float pedalInclineAngle = pedalInclineAngleDeg(sledPosition, dap_config_st);
+
+      // compute angular velocity & acceleration of incline angke
+      float pedalInclineAngle_Accel = pedalInclineAngleAccel(pedalInclineAngle);
+
+      //float legRotationalMoment = 0.0000001;
+      //float forceCorrection = pedalInclineAngle_Accel * legRotationalMoment;
+
+      //Serial.print(pedalInclineAngle_Accel);
+      //Serial.println(" ");
+
+    #endif
+
+
+    // Get the loadcell reading
+    float loadcellReading = loadcell->getReadingKg();
+
+    // Do the loadcell signal filtering
+    float filteredReading = kalman->filteredValue(loadcellReading, 0, dap_config_st.payLoadPedalConfig_.kf_modelNoise);
+    float changeVelocity = kalman->changeVelocity();
+
+
+
+    // Apply FIR notch filter to reduce force oscillation caused by ABS
+    //#define APPLY_FIR_FILTER
+    #ifdef APPLY_FIR_FILTER
+      float filteredReading2 = firNotchFilter->filterValue(loadcellReading);
+      if (firCycleIncrementer > minCyclesForFirToInit)
+      {
+        filteredReading = filteredReading2;
+      }
+      else
+      {
+          firCycleIncrementer++;
+      }
+
+      firCycleIncrementer++;
+      /*if (firCycleIncrementer % 500 == 0)
+      { 
+        firCycleIncrementer = 0;
+        Serial.print(filteredReading);
+        Serial.print(",   ");
+        Serial.print(filteredReading2);
+        Serial.println("   ");
+      }*/
       
-    // provide joystick output on PIN
-	    #ifdef Using_analog_output
-	      int dac_value=(int)(joystickNormalizedToInt32*255/10000);
-	      dacWrite(D_O,dac_value);
-	    #endif
-	
-	
-	    // simulate ABS trigger 
-	    if(dap_config_st.payLoadPedalConfig_.Simulate_ABS_trigger==1)
-	    {
-	      int32_t ABS_trigger_value=dap_config_st.payLoadPedalConfig_.Simulate_ABS_value*100;
-	      if(joystickNormalizedToInt32 > ABS_trigger_value)
-	      {
-	        absOscillation.trigger();
-	      }
-	    }
+    #endif
+    
 
-      #ifdef PRINT_USED_STACK_SIZE
-        unsigned int temp2 = uxTaskGetStackHighWaterMark(nullptr);
-        Serial.print("PU task stack size="); Serial.println(temp2);
-      #endif
+    //#define DEBUG_FILTER
+    if (dap_config_st.payLoadPedalConfig_.debug_flags_0 & DEBUG_INFO_0_LOADCELL_READING) 
+    {
+      static RTDebugOutput<float, 2> rtDebugFilter({ "rawReading_g", "filtered_g"});
+      rtDebugFilter.offerData({ loadcellReading * 1000, filteredReading * 1000});
+    }
+      
 
+    /*#ifdef ABS_OSCILLATION
+      filteredReading += forceAbsOffset;
+    #endif*/
+
+    // use interpolation to determine local linearized spring stiffness
+    double stepperPosFraction = stepper->getCurrentPositionFraction();
+    //double stepperPosFraction2 = stepper->getCurrentPositionFractionFromExternalPos( -(int32_t)(isv57.servo_pos_given_p + isv57.servo_pos_error_p - isv57.getZeroPos()) );
+    //int32_t Position_Next = MoveByInterpolatedStrategy(filteredReading, stepperPosFraction, &forceCurve, &dap_calculationVariables_st, &dap_config_st);
+    int32_t Position_Next = MoveByPidStrategy(filteredReading, stepperPosFraction, stepper, &forceCurve, &dap_calculationVariables_st, &dap_config_st, absForceOffset_fl32);
+
+
+    //#define DEBUG_STEPPER_POS
+    if (dap_config_st.payLoadPedalConfig_.debug_flags_0 & DEBUG_INFO_0_STEPPER_POS) 
+    {
+      static RTDebugOutput<int32_t, 5> rtDebugFilter({ "ESP_pos", "ESP_tar_pos", "ISV_pos", "frac1"});
+      rtDebugFilter.offerData({ stepper->getCurrentPositionSteps(), Position_Next, -(int32_t)(isv57.servo_pos_given_p + isv57.servo_pos_error_p - isv57.getZeroPos()), (int32_t)(stepperPosFraction * 10000.)});
+    }
+
+    
+    //stepper->printStates();
+    
+
+    // add dampening
+    if (dap_calculationVariables_st.dampingPress  > 0.0001)
+    {
+      // dampening is proportional to velocity --> D-gain for stability
+      Position_Next -= dap_calculationVariables_st.dampingPress * changeVelocity * dap_calculationVariables_st.springStiffnesssInv;
+    }
+      
+
+
+    
+
+  
+    // clip target position to configured target interval
+    Position_Next = (int32_t)constrain(Position_Next, dap_calculationVariables_st.stepperPosMin, dap_calculationVariables_st.stepperPosMax);
+
+    // if pedal in min position, recalibrate position 
     #ifdef ISV_COMMUNICATION
+    // Take the semaphore and just update the config file, then release the semaphore
+        if(xSemaphoreTake(semaphore_resetServoPos, (TickType_t)1)==pdTRUE)
+        {
+          if (stepper->isAtMinPos())
+          {
+            stepper->correctPos(servo_offset_compensation_steps_i32);
+            servo_offset_compensation_steps_i32 = 0;
+          }
+          xSemaphoreGive(semaphore_resetServoPos);
+        }
+    #endif
+
+
+
+    // get current stepper position right before sheduling a new move
+    //int32_t stepperPosCurrent = stepper->getCurrentPositionSteps();
+    //int32_t stepperPosCurrent = stepper->getTargetPositionSteps();
+    //int32_t movement = abs(stepperPosCurrent - Position_Next);
+    //if (movement > MIN_STEPS)
+    {
+      stepper->moveTo(Position_Next, false);
+    }
+
+    
+
+    // compute controller output
+    if(semaphore_updateJoystick!=NULL)
+    {
+      if(xSemaphoreTake(semaphore_updateJoystick, (TickType_t)1)==pdTRUE) {
+        joystickNormalizedToInt32 = NormalizeControllerOutputValue(loadcellReading, dap_calculationVariables_st.Force_Min, dap_calculationVariables_st.Force_Max, dap_config_st.payLoadPedalConfig_.maxGameOutput);
+        //joystickNormalizedToInt32 = NormalizeControllerOutputValue(filteredReading, dap_calculationVariables_st.Force_Min, dap_calculationVariables_st.Force_Max, dap_config_st.payLoadPedalConfig_.maxGameOutput);
+        xSemaphoreGive(semaphore_updateJoystick);
+      }
+    }
+    else
+    {
+      semaphore_updateJoystick = xSemaphoreCreateMutex();
+      //Serial.println("semaphore_updateJoystick == 0");
+    }
+
+    // provide joystick output on PIN
+    #ifdef Using_analog_output
+      int dac_value=(int)(joystickNormalizedToInt32*255/10000);
+      dacWrite(D_O,dac_value);
+    #endif
+
+
+    // simulate ABS trigger 
+    if(dap_config_st.payLoadPedalConfig_.Simulate_ABS_trigger==1)
+    {
+      int32_t ABS_trigger_value=dap_config_st.payLoadPedalConfig_.Simulate_ABS_value*100;
+      if(joystickNormalizedToInt32 > ABS_trigger_value)
+      {
+        absOscillation.trigger();
+      }
+    }
+
+    #ifdef PRINT_USED_STACK_SIZE
+      unsigned int temp2 = uxTaskGetStackHighWaterMark(nullptr);
+      Serial.print("PU task stack size="); Serial.println(temp2);
+    #endif
+
+#ifdef ISV_COMMUNICATION
     }else{
       delay(100);
     }
-    #endif
+#endif
   }
 }
 
@@ -940,15 +943,15 @@ void servoCommunicationTask( void * pvParameters )
     if (isv57LifeSignal_b)
     {
 
-      //Checking Servo Communication
-      int64_t nowCheckTime = millis();
-      if(nowCheckTime - prevCheckTime > SERVO_CHECKING_PERIOD){
-        isv57LifeSignal_b = isv57.checkCommunication();
-        prevCheckTime = nowCheckTime;
-      }
-
         delay(20);
         //isv57.readServoStates();
+
+        //Checking Servo Communication
+        int64_t nowCheckTime = millis();
+        if(nowCheckTime - prevCheckTime > SERVO_CHECKING_PERIOD){
+          isv57LifeSignal_b = isv57.checkCommunication();
+          prevCheckTime = nowCheckTime;
+        }
         
 
         int32_t servo_offset_compensation_steps_local_i32 = 0;
@@ -1067,36 +1070,36 @@ void servoCommunicationTask( void * pvParameters )
           rtDebugFilter.offerData({ isv57.servo_pos_given_p, isv57.servo_pos_error_p, isv57.servo_current_percent, servo_offset_compensation_steps_i32});
         }
 
+       
+
+        
     }
     else
     {
-      
-
 #ifdef ISV_COMMUNICATION
-    if(!isv57LifeSignal_b){
-      Serial.println("Try to connecto to servo...");
-      // check whether iSV57 is connected
-      bool servoCommuState = isv57.checkCommunication();
+      if(!isv57LifeSignal_b){
+        Serial.println("Try to connecto to servo...");
+        // check whether iSV57 is connected
+        bool servoCommuState = isv57.checkCommunication();
 
-      Serial.print("iSV57 communication state:  ");
-      Serial.println(servoCommuState);
+        Serial.print("iSV57 communication state:  ");
+        Serial.println(servoCommuState);
 
-      if (servoCommuState && SENSORLESS_HOMING)
-      {
-        isv57.setupServoStateReading();
-        // isv57.sendTunedServoParameters();
+        if (servoCommuState && SENSORLESS_HOMING)
+        {
+          isv57.setupServoStateReading();
+          // isv57.sendTunedServoParameters();
+        }
+        delay(200);
+        if (servoCommuState && SENSORLESS_HOMING)
+        {
+          stepper->findMinMaxSensorless(&isv57);
+          isv57LifeSignal_b = true;
+        }
+        
+        
       }
-      delay(200);
-      if (servoCommuState && SENSORLESS_HOMING)
-      {
-        stepper->findMinMaxSensorless(&isv57);
-        isv57LifeSignal_b = true;
-      }
-      
-      
-    }
 #endif
-
       delay(1000);
     }
 
