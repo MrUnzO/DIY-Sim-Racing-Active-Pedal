@@ -924,9 +924,10 @@ int64_t timeDiff = 0;
 
 #define TIME_SINCE_SERVO_POS_CHANGE_TO_DETECT_STANDSTILL_IN_MS 200
 
+#ifdef ISV_COMMUNICATION
 #define SERVO_CHECKING_PERIOD 2000
 int64_t prevCheckTime = 0;
-
+#endif
 
 uint64_t print_cycle_counter_u64 = 0;
 void servoCommunicationTask( void * pvParameters )
@@ -945,13 +946,14 @@ void servoCommunicationTask( void * pvParameters )
 
         delay(20);
         //isv57.readServoStates();
-
+#ifdef ISV_COMMUNICATION
         //Checking Servo Communication
         int64_t nowCheckTime = millis();
         if(nowCheckTime - prevCheckTime > SERVO_CHECKING_PERIOD){
           isv57LifeSignal_b = isv57.checkCommunication();
           prevCheckTime = nowCheckTime;
         }
+#endif
         
 
         int32_t servo_offset_compensation_steps_local_i32 = 0;
@@ -1078,12 +1080,12 @@ void servoCommunicationTask( void * pvParameters )
     {
 #ifdef ISV_COMMUNICATION
       if(!isv57LifeSignal_b){
-        Serial.println("Try to connecto to servo...");
+        // Serial.println("Try to connecto to servo...");
         // check whether iSV57 is connected
         bool servoCommuState = isv57.checkCommunication();
 
-        Serial.print("iSV57 communication state:  ");
-        Serial.println(servoCommuState);
+        // Serial.print("iSV57 communication state:  ");
+        // Serial.println(servoCommuState);
 
         if (servoCommuState && SENSORLESS_HOMING)
         {
